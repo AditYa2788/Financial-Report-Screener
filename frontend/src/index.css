@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    background-color: #05080f;
+    color: #e2e8f0;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0d1117; }
+  ::-webkit-scrollbar-thumb { background: #263047; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #374151; }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface-900 border border-surface-700 rounded-xl;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium;
+  }
+  .badge-green { @apply badge bg-emerald-950 text-emerald-400 border border-emerald-800; }
+  .badge-blue  { @apply badge bg-blue-950  text-blue-400  border border-blue-800; }
+  .badge-cyan  { @apply badge bg-cyan-950  text-cyan-400  border border-cyan-800; }
+  .badge-amber { @apply badge bg-amber-950 text-amber-400 border border-amber-800; }
+  .tag-pill {
+    @apply px-2 py-0.5 rounded-full text-xs font-mono bg-surface-700 text-cyan-300
+           border border-surface-600 hover:border-cyan-700 hover:bg-cyan-950
+           transition-colors cursor-default;
+  }
+  .btn-primary {
+    @apply px-5 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-surface-950 font-semibold
+           rounded-lg transition-colors text-sm;
+  }
+  .btn-ghost {
+    @apply px-4 py-2 border border-surface-600 hover:border-cyan-700 hover:text-cyan-400
+           text-gray-400 rounded-lg transition-colors text-sm;
+  }
+  .input-field {
+    @apply w-full bg-surface-800 border border-surface-600 rounded-lg px-4 py-2.5
+           text-gray-100 placeholder-gray-500 focus:outline-none focus:border-cyan-500
+           focus:ring-1 focus:ring-cyan-500 transition-colors text-sm;
+  }
+  .section-title {
+    @apply text-xs font-mono font-semibold uppercase tracking-widest text-gray-500;
+  }
+  .similarity-bar {
+    @apply h-1.5 rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500;
+  }
+}
+
+/* Fade-in animation */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fadeUp 0.3s ease forwards; }
+
+/* Pulse dot for live indicator */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.live-dot { animation: pulse-dot 2s ease-in-out infinite; }
