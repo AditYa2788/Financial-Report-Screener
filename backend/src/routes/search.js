@@ -4,12 +4,17 @@ const Filing = require('../models/Filing');
 const tfidf = require('../processors/tfidf');
 const { searchParagraphs } = require('../processors/cosineSimilarity');
 const { processText } = require('../processors/textProcessor');
+const { cacheGet, cacheSet } = require('../config/redis');
 
 // GET /api/search?q=supply+chain&company=AAPL&dateFrom=2023-01-01&limit=20
 router.get('/', async (req, res) => {
   try {
     const { q, company, dateFrom, dateTo, limit = 20, type } = req.query;
     if (!q || !q.trim()) return res.status(400).json({ error: 'q is required' });
+
+    const cacheKey = `search:${q.trim().toLowerCase()}:${company||''}:${type||''}:${dateFrom||''}:${dateTo||''}:${limit}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ ...cached, fromCache: true });
 
     const filter = { processingStatus: 'completed' };
     if (company) filter.ticker = company.toUpperCase();
@@ -75,7 +80,9 @@ router.get('/', async (req, res) => {
     all.sort((a, b) => b.similarity - a.similarity);
     const results = all.slice(0, +limit);
 
-    res.json({ results, query: q, total: results.length, filingsSearched: filings.length });
+    const payload = { results, query: q, total: results.length, filingsSearched: filings.length };
+    await cacheSet(cacheKey, payload);
+    res.json(payload);
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: err.message });
