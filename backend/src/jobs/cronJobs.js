@@ -1,8 +1,6 @@
 const cron = require('node-cron');
 const { ingestCompany } = require('../routes/filings');
-const { computeTrendingKeywords } = require('../routes/keywords');
 
-// Core set of companies to track automatically
 const TRACKED = [
   { cik: '320193',  ticker: 'AAPL',  name: 'Apple Inc.' },
   { cik: '789019',  ticker: 'MSFT',  name: 'Microsoft Corp.' },
@@ -20,24 +18,13 @@ function initCronJobs() {
   // Daily 6AM: check for new 10-Ks
   cron.schedule('0 6 * * *', async () => {
     console.log('[CRON] 10-K ingestion pass');
-    for (const co of TRACKED) {
-      await ingestCompany(co, '10-K');
-    }
+    for (const co of TRACKED) await ingestCompany(co, '10-K');
   });
 
-  // Daily 8AM: check for new 8-Ks (earnings releases)
+  // Daily 8AM: check for new 8-Ks
   cron.schedule('0 8 * * *', async () => {
     console.log('[CRON] 8-K ingestion pass');
-    for (const co of TRACKED) {
-      await ingestCompany(co, '8-K');
-    }
-  });
-
-  // Every 6 hours: recompute trending keywords
-  cron.schedule('0 */6 * * *', async () => {
-    console.log('[CRON] Computing trending keywords');
-    try { await computeTrendingKeywords(); }
-    catch (err) { console.error('[CRON] keyword compute error:', err.message); }
+    for (const co of TRACKED) await ingestCompany(co, '8-K');
   });
 
   console.log('[CRON] Jobs scheduled');

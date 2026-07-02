@@ -1,12 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const Filing = require('../models/Filing');
-const tfidf = require('../processors/tfidf');
-const { searchParagraphs } = require('../processors/cosineSimilarity');
-const { processText } = require('../processors/textProcessor');
+const Paragraph = require('../models/Paragraph');
 const { cacheGet, cacheSet } = require('../config/redis');
 
-// GET /api/search?q=supply+chain&company=AAPL&dateFrom=2023-01-01&limit=20
+// GET /api/search?q=supply+chain&company=AAPL&type=10-K&dateFrom=2023-01-01&limit=20
 router.get('/', async (req, res) => {
   try {
     const { q, company, dateFrom, dateTo, limit = 20, type } = req.query;
@@ -16,71 +13,38 @@ router.get('/', async (req, res) => {
     const cached = await cacheGet(cacheKey);
     if (cached) return res.json({ ...cached, fromCache: true });
 
-    const filter = { processingStatus: 'completed' };
-    if (company) filter.ticker = company.toUpperCase();
-    if (type) filter.filingType = type;
+    // Atlas Search full-text stage (Lucene english analyzer handles stemming + stop words)
+    const pipeline = [
+      {
+        $search: {
+          index: 'paragraph_text',
+          text: { query: q.trim(), path: 'text', fuzzy: { maxEdits: 1 } }
+        }
+      },
+      { $addFields: { score: { $meta: 'searchScore' } } }
+    ];
+
+    // Post-search filters
+    const matchFilter = {};
+    if (company)  matchFilter.ticker     = company.toUpperCase();
+    if (type)     matchFilter.filingType = type;
     if (dateFrom || dateTo) {
-      filter.filedAt = {};
-      if (dateFrom) filter.filedAt.$gte = new Date(dateFrom);
-      if (dateTo) filter.filedAt.$lte = new Date(dateTo);
+      matchFilter.filedAt = {};
+      if (dateFrom) matchFilter.filedAt.$gte = new Date(dateFrom);
+      if (dateTo)   matchFilter.filedAt.$lte = new Date(dateTo);
     }
+    if (Object.keys(matchFilter).length) pipeline.push({ $match: matchFilter });
 
-    const filings = await Filing.find(filter)
-      .sort({ filedAt: -1 })
-      .limit(50)
-      .select('accessionNumber cik companyName ticker filingType filedAt paragraphs topKeywords');
-
-    if (!filings.length) return res.json({ results: [], query: q, total: 0, filingsSearched: 0 });
-
-    // Warm up the IDF state by building a mini-corpus from all stored vectors
-    // We use the union of all terms across fetched filings as a proxy
-    const allTermSets = [];
-    filings.forEach(f => {
-      f.paragraphs.forEach(p => {
-        if (p.tfidfVector) allTermSets.push(Object.keys(p.tfidfVector));
-      });
+    pipeline.push({ $limit: +limit });
+    pipeline.push({
+      $project: {
+        text: 1, ticker: 1, companyName: 1, filingType: 1,
+        filedAt: 1, accessionNumber: 1, index: 1, score: 1, wordCount: 1
+      }
     });
-    // Build IDF with total doc count = number of paragraphs seen
-    if (allTermSets.length) {
-      tfidf.totalDocuments = allTermSets.length;
-      const df = {};
-      allTermSets.forEach(terms => {
-        new Set(terms).forEach(t => { df[t] = (df[t] || 0) + 1; });
-      });
-      tfidf.documentFrequency = df;
-    }
 
-    const all = [];
-    for (const filing of filings) {
-      const paras = filing.paragraphs.map(p => ({
-        index: p.index,
-        text: p.text,
-        tfidfVector: p.tfidfVector || {},
-        wordCount: p.wordCount
-      }));
-      if (!paras.length) continue;
-
-      const hits = searchParagraphs(q, paras, 3);
-      hits.forEach(h => {
-        all.push({
-          filingId: filing._id,
-          accessionNumber: filing.accessionNumber,
-          companyName: filing.companyName,
-          ticker: filing.ticker,
-          filingType: filing.filingType,
-          filedAt: filing.filedAt,
-          paragraphIndex: h.index,
-          text: h.text,
-          similarity: parseFloat(h.similarity.toFixed(4)),
-          wordCount: h.wordCount
-        });
-      });
-    }
-
-    all.sort((a, b) => b.similarity - a.similarity);
-    const results = all.slice(0, +limit);
-
-    const payload = { results, query: q, total: results.length, filingsSearched: filings.length };
+    const results = await Paragraph.aggregate(pipeline);
+    const payload = { results, query: q, total: results.length };
     await cacheSet(cacheKey, payload);
     res.json(payload);
   } catch (err) {
@@ -95,37 +59,20 @@ router.get('/filing/:accessionNumber', async (req, res) => {
     const { q } = req.query;
     if (!q) return res.status(400).json({ error: 'q is required' });
 
-    const filing = await Filing.findOne({ accessionNumber: req.params.accessionNumber });
-    if (!filing) return res.status(404).json({ error: 'Filing not found' });
-
-    // Rebuild IDF from this filing's paragraphs
-    const allTermSets = filing.paragraphs.map(p => Object.keys(p.tfidfVector || {}));
-    tfidf.totalDocuments = allTermSets.length;
-    const df = {};
-    allTermSets.forEach(terms => {
-      new Set(terms).forEach(t => { df[t] = (df[t] || 0) + 1; });
-    });
-    tfidf.documentFrequency = df;
-
-    const paras = filing.paragraphs.map(p => ({
-      index: p.index,
-      text: p.text,
-      tfidfVector: p.tfidfVector || {},
-      wordCount: p.wordCount
-    }));
-
-    const results = searchParagraphs(q, paras, 10);
-    res.json({
-      filing: {
-        accessionNumber: filing.accessionNumber,
-        companyName: filing.companyName,
-        ticker: filing.ticker,
-        filedAt: filing.filedAt,
-        filingType: filing.filingType
+    const results = await Paragraph.aggregate([
+      {
+        $search: {
+          index: 'paragraph_text',
+          text: { query: q.trim(), path: 'text', fuzzy: { maxEdits: 1 } }
+        }
       },
-      results: results.map(r => ({ ...r, similarity: parseFloat(r.similarity.toFixed(4)) })),
-      query: q
-    });
+      { $addFields: { score: { $meta: 'searchScore' } } },
+      { $match: { accessionNumber: req.params.accessionNumber } },
+      { $limit: 10 },
+      { $project: { text: 1, index: 1, score: 1, wordCount: 1 } }
+    ]);
+
+    res.json({ accessionNumber: req.params.accessionNumber, results, query: q });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const Filing = require('../models/Filing');
+const Paragraph = require('../models/Paragraph');
 const Company = require('../models/Company');
 const { fetchCompanyFilings, fetchFilingDocument } = require('../scrapers/edgarScraper');
 const { splitIntoParagraphs } = require('../processors/textProcessor');
-const tfidf = require('../processors/tfidf');
 
 // GET /api/filings?page=1&limit=20&company=AAPL&type=10-K
 router.get('/', async (req, res) => {
@@ -12,14 +12,10 @@ router.get('/', async (req, res) => {
     const { page = 1, limit = 20, company, type } = req.query;
     const filter = { processingStatus: 'completed' };
     if (company) filter.ticker = company.toUpperCase();
-    if (type) filter.filingType = type;
+    if (type)    filter.filingType = type;
 
     const [filings, total] = await Promise.all([
-      Filing.find(filter)
-        .sort({ filedAt: -1 })
-        .skip((+page - 1) * +limit)
-        .limit(+limit)
-        .select('-paragraphs'),
+      Filing.find(filter).sort({ filedAt: -1 }).skip((+page - 1) * +limit).limit(+limit),
       Filing.countDocuments(filter)
     ]);
 
@@ -38,7 +34,7 @@ router.get('/stats/overview', async (req, res) => {
       Filing.find({ processingStatus: 'completed' })
         .sort({ filedAt: -1 })
         .limit(5)
-        .select('companyName ticker filedAt filingType topKeywords paragraphCount wordCount')
+        .select('companyName ticker filedAt filingType paragraphCount wordCount')
     ]);
     res.json({ totalFilings, totalCompanies: companies.length, recentFilings });
   } catch (err) {
@@ -49,8 +45,7 @@ router.get('/stats/overview', async (req, res) => {
 // GET /api/filings/:accessionNumber
 router.get('/:accessionNumber', async (req, res) => {
   try {
-    const filing = await Filing.findOne({ accessionNumber: req.params.accessionNumber })
-      .select('-paragraphs');
+    const filing = await Filing.findOne({ accessionNumber: req.params.accessionNumber });
     if (!filing) return res.status(404).json({ error: 'Filing not found' });
     res.json(filing);
   } catch (err) {
@@ -62,25 +57,19 @@ router.get('/:accessionNumber', async (req, res) => {
 router.get('/:accessionNumber/paragraphs', async (req, res) => {
   try {
     const { page = 1, limit = 50 } = req.query;
-    const filing = await Filing.findOne({ accessionNumber: req.params.accessionNumber })
-      .select('paragraphs companyName ticker filedAt accessionNumber');
-    if (!filing) return res.status(404).json({ error: 'Filing not found' });
+    const skip = (+page - 1) * +limit;
 
-    const start = (+page - 1) * +limit;
-    const paras = filing.paragraphs.slice(start, start + +limit).map(p => ({
-      index: p.index,
-      text: p.text,
-      wordCount: p.wordCount
-    }));
+    const [paragraphs, total] = await Promise.all([
+      Paragraph.find({ accessionNumber: req.params.accessionNumber })
+        .sort({ index: 1 })
+        .skip(skip)
+        .limit(+limit)
+        .select('index text wordCount'),
+      Paragraph.countDocuments({ accessionNumber: req.params.accessionNumber })
+    ]);
 
-    res.json({
-      accessionNumber: filing.accessionNumber,
-      companyName: filing.companyName,
-      ticker: filing.ticker,
-      paragraphs: paras,
-      total: filing.paragraphs.length,
-      page: +page
-    });
+    if (!total) return res.status(404).json({ error: 'Filing not found' });
+    res.json({ accessionNumber: req.params.accessionNumber, paragraphs, total, page: +page });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -96,6 +85,7 @@ router.post('/ingest', async (req, res) => {
 
 async function ingestCompany(company, formType = '10-K') {
   const filingsMeta = await fetchCompanyFilings(company.cik, formType, 3);
+
   for (const meta of filingsMeta) {
     try {
       const exists = await Filing.findOne({ accessionNumber: meta.accessionNumber });
@@ -103,12 +93,12 @@ async function ingestCompany(company, formType = '10-K') {
 
       const doc = exists || await Filing.create({
         accessionNumber: meta.accessionNumber,
-        cik: company.cik,
-        companyName: company.name || meta.companyName,
-        ticker: company.ticker || meta.ticker,
-        filingType: formType,
-        filedAt: new Date(meta.filingDate),
-        reportPeriod: meta.reportDate ? new Date(meta.reportDate) : null,
+        cik:             company.cik,
+        companyName:     company.name || meta.companyName,
+        ticker:          company.ticker || meta.ticker,
+        filingType:      formType,
+        filedAt:         new Date(meta.filingDate),
+        reportPeriod:    meta.reportDate ? new Date(meta.reportDate) : null,
         processingStatus: 'processing'
       });
 
@@ -119,25 +109,42 @@ async function ingestCompany(company, formType = '10-K') {
       }
 
       const paras = splitIntoParagraphs(rawText);
-      const processed = tfidf.processFilingParagraphs(paras);
-      const keywords = tfidf.extractFilingKeywords(processed, 50);
+
+      // Delete any stale paragraphs from a previous failed attempt
+      await Paragraph.deleteMany({ accessionNumber: meta.accessionNumber });
+
+      const paragraphDocs = paras.map((text, i) => ({
+        filingId:        doc._id,
+        accessionNumber: meta.accessionNumber,
+        cik:             company.cik,
+        ticker:          company.ticker || meta.ticker,
+        companyName:     company.name || meta.companyName,
+        filingType:      formType,
+        filedAt:         new Date(meta.filingDate),
+        index:           i,
+        text,
+        wordCount:       text.split(/\s+/).length
+      }));
+
+      await Paragraph.insertMany(paragraphDocs, { ordered: false });
 
       await Filing.findByIdAndUpdate(doc._id, {
-        paragraphs: processed,
-        topKeywords: keywords,
-        paragraphCount: processed.length,
-        wordCount: processed.reduce((s, p) => s + (p.wordCount || 0), 0),
-        processedAt: new Date(),
+        paragraphCount:   paras.length,
+        wordCount:        paragraphDocs.reduce((s, p) => s + p.wordCount, 0),
+        processedAt:      new Date(),
         processingStatus: 'completed'
       });
 
       await Company.findOneAndUpdate(
         { cik: company.cik },
-        { $set: { cik: company.cik, ticker: company.ticker, name: company.name, lastFiled: new Date(meta.filingDate) }, $inc: { filingCount: 1 } },
+        {
+          $set: { cik: company.cik, ticker: company.ticker, name: company.name, lastFiled: new Date(meta.filingDate) },
+          $inc: { filingCount: 1 }
+        },
         { upsert: true }
       );
 
-      console.log(`Ingested: ${meta.accessionNumber} (${company.ticker})`);
+      console.log(`Ingested: ${meta.accessionNumber} (${company.ticker}) — ${paras.length} paragraphs`);
     } catch (err) {
       console.error(`Ingest error ${meta.accessionNumber}: ${err.message}`);
     }
